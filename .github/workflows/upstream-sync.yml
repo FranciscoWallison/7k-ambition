@@ -1,0 +1,86 @@
+# Mantem o branch main de FranciscoWallison/7k-ambition sincronizado com o
+# repositorio canonico do Seven Kingdoms: Ambition, que fica no GIT DO SOURCEFORGE.
+#
+# Upstream: https://git.code.sf.net/p/seven-kingdoms-ambition/code  (branch: main)
+#
+# Diferencas em relacao ao upstream-sync.yml do 7kaa (que mora no outro repo):
+#   - o branch canonico do Ambition e 'main', nao 'master';
+#   - o Ambition e um fork do 7KAA que PRESERVOU o historico, entao as tags vao de
+#     v2.13.1 ate v2.15.7 (herdadas do 7kfans) e seguem em v3.x (proprias). Por isso
+#     o push de tags aqui traz as duas linhagens.
+#
+# Por que rebase e nao fast-forward:
+#   O arquivo deste workflow vive no main, entao o main fica sempre 1 commit "a
+#   frente" do upstream e um fast-forward quebraria assim que o upstream avancasse.
+#   Aqui a gente reaplica (rebase) o commit deste workflow em cima do upstream.
+#
+# ATENCAO, a armadilha que ja mordeu no fork do Warzone 2100:
+#   O GitHub registra os workflows (e o cron do schedule) A PARTIR DO DEFAULT BRANCH.
+#   Hoje o default aqui e o main, que e onde este arquivo esta. Se um dia voce trocar
+#   o default para um branch de trabalho, LEVE ESTE ARQUIVO JUNTO, senao o GitHub
+#   marca o workflow como "deleted" e o sync morre em silencio.
+#   Conferir: o campo "state" em
+#   https://api.github.com/repos/FranciscoWallison/7k-ambition/actions/workflows/upstream-sync.yml
+
+name: Upstream Sync
+
+on:
+  schedule:
+    - cron: '45 6 * * *'     # todo dia as 06:45 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do main (historico completo p/ achar a base do rebase)
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Rebase do commit deste workflow sobre o upstream + push
+        run: |
+          set -euo pipefail
+          git config user.name  "Francisco Wallison"
+          git config user.email "franciscowallison@gmail.com"
+
+          git remote add upstream https://git.code.sf.net/p/seven-kingdoms-ambition/code
+          git fetch --tags upstream main
+
+          UP=$(git rev-parse upstream/main)
+          BASE=$(git merge-base "$UP" HEAD)
+          OWN=$(git rev-list --count "$BASE"..HEAD)
+          BEHIND=$(git rev-list --count HEAD.."$UP")
+          echo "upstream=${UP:0:9} base=${BASE:0:9} proprios=$OWN atras=$BEHIND"
+
+          if [ "$BASE" = "$UP" ]; then
+            {
+              echo "### Ja estava em dia"
+              echo "Upstream em \`${UP:0:9}\`. Nada a fazer."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          git rebase "$UP"
+          git push --force-with-lease origin main
+          git push --tags origin || true
+
+          NEW=$(git rev-parse --short HEAD)
+          {
+            echo "### main sincronizado"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| upstream (SourceForge) | \`${UP:0:9}\` |"
+            echo "| upstream tinha andado | $BEHIND commit(s) |"
+            echo "| novo tip do espelho | \`$NEW\` |"
+            echo "| commits proprios reaplicados | $OWN |"
+          } >> "$GITHUB_STEP_SUMMARY"
