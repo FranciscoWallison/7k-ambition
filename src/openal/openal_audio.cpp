@@ -31,6 +31,11 @@
 #include <openal_audio.h>
 #include <wav_stream.h>
 
+/* Quantos buffers um stream mantem enfileirados no OpenAL. Espelha o
+ * BUFFER_COUNT local de play_any_wav e play_long_wav. Usado como teto de
+ * seguranca no laco de stream_data (ver comentario la). */
+#define STREAM_QUEUED_BUFFERS 4
+
 #define LWAV_STREAM_BUFSIZ    0x1000
 #define LWAV_BANKS            4
 #define LOOPWAV_STREAM_BUFSIZ 0x1000
@@ -1094,9 +1099,37 @@ bool OpenALAudio::StreamContext::stream_data(int new_buffer_count)
 	format = openal_format(this->stream);
 	max_frames = this->stream->frame_rate() * MAX_BUFFER_TIME_MS / 1000;
 
+	// TETO DE SEGURANCA (correcao Gameplay RTS).
+	//
+	// O laco original era um for(;;) cuja unica saida normal era o OpenAL parar
+	// de reportar buffers processados (AL_BUFFERS_PROCESSED == 0). Se ele
+	// continuar reportando -- o que acontece quando a fonte entra em underrun e
+	// cada buffer enfileirado e consumido na hora -- o laco nunca termina: o jogo
+	// passa a reler o audio do disco sem parar, a janela congela e o processo
+	// fica em 100% de um nucleo sem responder.
+	//
+	// Medido num travamento real em 27/08/2026 (v3.2.11, Windows 11): ~123 mil
+	// leituras por segundo, 639 MB/s, zero escritas, com a amostragem do ponteiro
+	// de instrucao caindo em stream_data -> check_al e dentro da OpenAL32.dll.
+	//
+	// So existem STREAM_QUEUED_BUFFERS buffers na fila, mais os new_buffer_count
+	// que esta chamada cria; processar mais que isso numa unica passada nao faz
+	// sentido. Ao bater o teto saimos e a proxima chamada continua o trabalho. Na
+	// pior hipotese o audio falha por um instante, em vez de o jogo travar.
+	//
+	// O mesmo laco existe no 7kaa oficial (7kfans), entao a correcao vale para os
+	// dois projetos.
+	const int max_refills = new_buffer_count + STREAM_QUEUED_BUFFERS;
+	int refills = 0;
+
 	for (;;)
 	{
 		buf = 0;
+
+		// checado depois de zerar buf: o bloco pos-laco pode chamar
+		// alDeleteBuffers(1, &buf) e nao pode receber lixo.
+		if (++refills > max_refills)
+			break;
 
 		if (new_buffer_count > 0)
 		{
